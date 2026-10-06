@@ -866,10 +866,14 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
 
         # PPC64 needs MSR.SF=1 so the CPU decodes 64-bit instructions.
         # Without it, any ld/std fires UC_ERR_EXCEPTION immediately.
-        if arch_str == "ppc" and mode_str.startswith("ppc64"):
+        # PPC32 has a similar challenge but needs MSR.FP=1
+        if arch_str == "ppc":
             msr_reg = self._reg_map.get("msr")
             if msr_reg is not None:
-                self._uc.reg_write(msr_reg, 1 << 63)
+                if mode_str.startswith("ppc64"):
+                    self._uc.reg_write(msr_reg, 1 << 63)
+                else:
+                    self._uc.reg_write(msr_reg, 0x2000)
 
         for region in self._regions:
             self._map_region(region)
