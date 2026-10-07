@@ -17,6 +17,7 @@ import time
 from .. import hal_log as hal_log_conf
 from .. import hal_stats
 from ..trace import events as trace_events
+from ..trace import taint as trace_taint
 from ..hal_config import HalInterceptConfig  # re-exported for convenience
 
 log = logging.getLogger(__name__)
@@ -206,7 +207,8 @@ def _traced_handler(handler: Callable, bp_cls: Any, intercept: Any) -> Callable:
         except Exception:  # noqa: BLE001
             lr = None
         start = time.monotonic()
-        result = handler(cls, target, bp_addr)
+        with trace_taint.watch(target, symbol):
+            result = handler(cls, target, bp_addr)
         bypass, ret = result if isinstance(result, tuple) else (None, None)
         ret_val = (int(ret) & 0xFFFFFFFF) if isinstance(ret, int) else None
         trace_events.emit_poll(

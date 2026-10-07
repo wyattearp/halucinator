@@ -50,6 +50,20 @@ def _cmd_timeline(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_taint(args: argparse.Namespace) -> int:
+    for row in analyze.taint_report(_load(args)):
+        if not row["stored"]:
+            continue  # received but never adopted into guest memory (e.g. not a handler path)
+        print(f"tag #{row['tag']} {row['source']} @{row['t']:.4f}s")
+        for kind in ("stored", "sinks"):
+            for hit in row[kind]:
+                print(f"    {kind[:-1] if kind == 'sinks' else 'stored by':<9} "
+                      f"{hit['handler']} ({hit['bytes']} B) @{hit['t']:.4f}s")
+        if not row["sinks"]:
+            print("    LOST: stored in guest memory, never read out by a handler")
+    return 0
+
+
 def _cmd_stats(args: argparse.Namespace) -> int:
     for kind, count in sorted(Counter(e.get("kind") for e in _load(args)).items()):
         print(f"{kind:<12}{count}")
@@ -77,6 +91,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--skip", action="append", default=[], help="drop rows whose target contains this")
     p.add_argument("--speed", type=float, help="replay: 1=real time, 0.1=10x slower, 0=no delay")
     p.add_argument("--max-gap", type=float, default=2.0, help="cap a scaled pause (s)")
+    common("taint", _cmd_taint, "input -> output paths (handler-boundary taint)")
     common("stats", _cmd_stats, "event counts by kind")
 
     args = parser.parse_args(argv)

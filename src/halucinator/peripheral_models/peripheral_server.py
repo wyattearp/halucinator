@@ -17,6 +17,7 @@ import yaml
 import zmq
 
 from halucinator.trace import events as trace_events
+from halucinator.trace import taint as trace_taint
 
 log = logging.getLogger(__name__)
 
@@ -375,8 +376,9 @@ def run_server() -> None:
             topic, msg = decode_zmq_msg(string)
             log.info("Got message: Topic %s  Msg: %s", str(topic), str(msg))
             print(f"Got message: Topic {topic}  Msg: {msg}")
-            trace_events.emit("model_rx", "device", topic=topic,
-                              payload=_trace_payload(msg))
+            trace_taint.feed(trace_events.emit("model_rx", "device", topic=topic,
+                                               payload=_trace_payload(msg)),
+                             trace_taint.payload_bytes(msg))
             if topic.startswith("Peripheral"):
                 if topic in __RX_HANDLERS__:
                     _, method = __RX_HANDLERS__[topic]

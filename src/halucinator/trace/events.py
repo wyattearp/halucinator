@@ -65,15 +65,16 @@ def disable() -> None:
             _out = None
 
 
-def emit(kind: str, domain: str, **fields: Any) -> None:
-    """Append one event.  No-op unless :func:`enable` was called."""
+def emit(kind: str, domain: str, **fields: Any) -> Optional[int]:
+    """Append one event and return its ``seq``.  No-op (None) unless
+    :func:`enable` was called."""
     if _out is None:
-        return
+        return None
     with _lock:
         if _out is None:
-            return
+            return None
         _flush_polls()
-        _write(kind, domain, fields)
+        return _write(kind, domain, fields)
 
 
 def emit_poll(kind: str, domain: str, key: Any, signature: Any,
@@ -116,7 +117,7 @@ def _flush_polls(skip: Any = None) -> None:
         ent[2] = 0
 
 
-def _write(kind: str, domain: str, fields: Dict[str, Any]) -> None:
+def _write(kind: str, domain: str, fields: Dict[str, Any]) -> int:
     global _seq  # pylint: disable=global-statement
     assert _out is not None
     _seq += 1
@@ -129,4 +130,5 @@ def _write(kind: str, domain: str, fields: Dict[str, Any]) -> None:
     event.update(fields)
     _out.write(json.dumps(event, default=repr) + "\n")
     _out.flush()
+    return _seq
 

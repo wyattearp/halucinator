@@ -81,8 +81,10 @@ def _hex(event: Event) -> Optional[str]:
 
 
 def build_graph(events: List[Event], symbols: Optional[SymbolTable] = None
-                ) -> Tuple[Dict[str, Tuple[str, str, int]], Dict[Tuple[str, str], int]]:
-    """Returns (nodes: id -> (label, cluster, count), edges: (src, dst) -> count).
+                ) -> Tuple[Dict[str, Tuple[str, str, int]], Dict[Tuple[str, str], int],
+                           Dict[Tuple[str, str], int]]:
+    """Returns (nodes: id -> (label, cluster, count), edges: (src, dst) -> count,
+    taint_edges: (src, dst) -> tainted bytes).
 
     A ``model_tx`` is logged from inside the handler that produced it, i.e.
     just *before* that handler's own intercept event, so pending tx topics are
@@ -91,6 +93,9 @@ def build_graph(events: List[Event], symbols: Optional[SymbolTable] = None
     symbols = symbols or SymbolTable()
     nodes: Dict[str, List[Any]] = {}
     edges: Dict[Tuple[str, str], int] = defaultdict(int)
+    taint_edges: Dict[Tuple[str, str], int] = defaultdict(int)
+    rx_node: Dict[int, str] = {}              # tag (model_rx seq) -> model node
+    stored_by: Dict[int, set] = defaultdict(set)  # tag -> handler nodes that stored it
 
     def node(ident: str, label: str, cluster: str, count: int = 1) -> None:
         nodes.setdefault(ident, [label, cluster, 0])[2] += count
@@ -113,8 +118,22 @@ def build_graph(events: List[Event], symbols: Optional[SymbolTable] = None
             node(model, f"{topic}\\n[{iface}]", MODEL)
             node(dev, f"external device\\n{topic.split('.')[0]} [{iface}]", "device")
             edges[(model, dev) if kind == "model_tx" else (dev, model)] += 1
+            if kind == "model_rx":
+                rx_node[ev["seq"]] = model
             if kind == "model_tx":
                 pending.append(model)
+        elif kind == "taint_src":
+            handler = f"h:{ev['handler']}"
+            for tag in ev["tags"]:
+                stored_by[tag].add(handler)
+                if tag in rx_node:
+                    taint_edges[(rx_node[tag], handler)] += ev["len"]
+        elif kind == "taint_sink":
+            handler = f"h:{ev['handler']}"
+            for tag in ev["tags"]:
+                for src in stored_by.get(tag, ()):
+                    if src != handler:
+                        taint_edges[(src, handler)] += ev["tainted"]
         elif kind == "irq":
             src = f"d:irq:{ev.get('source')}"
             node(src, f"IRQ source\\n{ev.get('source')}", "device")
@@ -126,10 +145,12 @@ def build_graph(events: List[Event], symbols: Optional[SymbolTable] = None
                 nodes[key][2] += ev["count"]
                 for edge in [e for e in edges if e[1] == key]:
                     edges[edge] += ev["count"]
-    return {k: (v[0], v[1], v[2]) for k, v in nodes.items()}, dict(edges)
+    return ({k: (v[0], v[1], v[2]) for k, v in nodes.items()}, dict(edges),
+            dict(taint_edges))
 
 
-def to_dot(nodes: Dict[str, Tuple[str, str, int]], edges: Dict[Tuple[str, str], int]) -> str:
+def to_dot(nodes: Dict[str, Tuple[str, str, int]], edges: Dict[Tuple[str, str], int],
+           taint_edges: Optional[Dict[Tuple[str, str], int]] = None) -> str:
     out = ["digraph halucinator {", "  rankdir=LR; compound=true; fontname=Helvetica;",
            "  node [shape=box, fontname=Helvetica, fontsize=10];",
            "  edge [fontname=Helvetica, fontsize=9];"]
@@ -140,6 +161,8 @@ def to_dot(nodes: Dict[str, Tuple[str, str, int]], edges: Dict[Tuple[str, str], 
             out += [f'    "{i}" [label="{n[0]}\\n×{n[2]}", {_STYLE[cluster]}];' for i, n in members]
             out.append("  }")
     out += [f'  "{s}" -> "{d}" [label="{c}"];' for (s, d), c in edges.items()]
+    out += [f'  "{s}" -> "{d}" [label="taint {n}B", color="#c0392b", fontcolor="#c0392b", '
+            f'style=dashed, penwidth=2];' for (s, d), n in (taint_edges or {}).items()]
     return "\n".join(out + ["}"]) + "\n"
 
 
@@ -163,3 +186,20 @@ def crossings(events: List[Event], symbols: Optional[SymbolTable] = None) -> Lis
             continue
         rows.append({"seq": ev["seq"], "t": ev["t"], "from": frm, "to": to, "via": via})
     return rows
+
+
+def taint_report(events: List[Event]) -> List[Dict[str, Any]]:
+    """One row per tagged input: where it was stored, where it reached, or lost."""
+    rows: Dict[int, Dict[str, Any]] = {}
+    for ev in events:
+        kind = ev.get("kind")
+        if kind == "model_rx":
+            rows[ev["seq"]] = {"tag": ev["seq"], "t": ev["t"], "source": _topic(ev)[0],
+                               "stored": [], "sinks": []}
+        elif kind in ("taint_src", "taint_sink"):
+            key = "stored" if kind == "taint_src" else "sinks"
+            for tag in ev["tags"]:
+                if tag in rows:
+                    rows[tag][key].append({"seq": ev["seq"], "t": ev["t"], "handler": ev["handler"],
+                                           "bytes": ev.get("tainted", ev.get("len"))})
+    return list(rows.values())
