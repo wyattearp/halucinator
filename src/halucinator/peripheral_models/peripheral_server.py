@@ -16,6 +16,8 @@ from typing import Any, Callable, Optional, Tuple, Type, TypeVar, cast
 import yaml
 import zmq
 
+from halucinator.trace import events as trace_events
+
 log = logging.getLogger(__name__)
 
 # pylint: disable=global-statement
@@ -52,6 +54,25 @@ OUTPUT_DIRECTORY: Optional[str] = None
 
 
 Publisher = TypeVar("Publisher")
+
+
+def _trace_payload(data: Any) -> Any:
+    """JSON-safe copy of a message payload for the event log, with byte-like
+    values hex-encoded under ``<key>_hex`` so flow analysis can match them."""
+    if isinstance(data, dict):
+        out = {}
+        for key, val in data.items():
+            if isinstance(val, (bytes, bytearray)):
+                out[f"{key}_hex"] = trace_events.to_hex(val)
+            elif isinstance(val, (list, tuple)) and val and all(
+                    isinstance(v, int) and 0 <= v < 256 for v in val):
+                out[f"{key}_hex"] = bytes(val).hex()
+            elif isinstance(val, int) and 0 <= val < 256 and key in ("char", "chars"):
+                out[f"{key}_hex"] = format(val, "02x")
+            else:
+                out[key] = val
+        return out
+    return data
 
 
 def peripheral_model(cls: Type[Publisher]) -> Type[Publisher]:
@@ -99,6 +120,8 @@ def tx_msg(funct: CallableVar) -> CallableVar:
         topic = f"Peripheral.{model_cls.__name__}.{funct.__name__}"
         msg = encode_zmq_msg(topic, data)
         log.info("Sending: %s", msg)
+        trace_events.emit("model_tx", "model", topic=topic,
+                          payload=_trace_payload(data))
         __TX_SOCKET__.send_string(msg)
 
     return cast(CallableVar, tx_msg_decorator)
@@ -246,6 +269,7 @@ def trigger_interrupt(irq_num: int, source: Optional[str] = None) -> None:
     instead (issue #31).
     """
     log.info("Triggering interrupt %s (source=%s)", irq_num, source)
+    trace_events.emit("irq", "device", irq=irq_num, source=source)
     inject_irq(irq_num)
 
 
@@ -353,6 +377,8 @@ def run_server() -> None:
             topic, msg = decode_zmq_msg(string)
             log.info("Got message: Topic %s  Msg: %s", str(topic), str(msg))
             print(f"Got message: Topic {topic}  Msg: {msg}")
+            trace_events.emit("model_rx", "device", topic=topic,
+                              payload=_trace_payload(msg))
             if topic.startswith("Peripheral"):
                 if topic in __RX_HANDLERS__:
                     _, method = __RX_HANDLERS__[topic]

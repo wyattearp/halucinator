@@ -13,8 +13,10 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 import importlib
 import logging
+import time
 from .. import hal_log as hal_log_conf
 from .. import hal_stats
+from ..trace import events as trace_events
 from ..hal_config import HalInterceptConfig  # re-exported for convenience
 
 log = logging.getLogger(__name__)
@@ -178,6 +180,49 @@ def get_bp_handler(intercept: Any) -> Any:
     return bp_class
 
 
+def _traced_handler(handler: Callable, bp_cls: Any, intercept: Any) -> Callable:
+    """Wrap *handler* so each dispatch is recorded in the event log.
+
+    Wrapping at registration covers every dispatch path (avatar2 callback,
+    QEMU GDB loop, in-process loop) with one hook.  The wrapper is a straight
+    pass-through when no event log is enabled.
+    """
+    cls_name = bp_cls.__class__.__name__
+    cls_module = bp_cls.__class__.__module__
+    symbol = intercept.symbol
+
+    @wraps(handler)
+    def wrapper(cls: Any, target: Any, bp_addr: int) -> Any:
+        if not trace_events.is_enabled():
+            return handler(cls, target, bp_addr)
+        args = []
+        for idx in range(4):
+            try:
+                args.append(int(target.get_arg(idx)) & 0xFFFFFFFF)
+            except Exception:  # noqa: BLE001 - tracing must never break dispatch
+                break
+        try:
+            lr = int(target.get_ret_addr()) & 0xFFFFFFFF
+        except Exception:  # noqa: BLE001
+            lr = None
+        start = time.monotonic()
+        result = handler(cls, target, bp_addr)
+        bypass, ret = result if isinstance(result, tuple) else (None, None)
+        ret_val = (int(ret) & 0xFFFFFFFF) if isinstance(ret, int) else None
+        trace_events.emit_poll(
+            "intercept", "handler", symbol or hex(bp_addr),
+            (tuple(args), ret_val, lr),
+            sym=symbol, pc=bp_addr, lr=lr, args=args,
+            cls=cls_name, module=cls_module, fn=handler.__name__,
+            bypass=bypass,
+            ret=ret_val,
+            dur_us=int((time.monotonic() - start) * 1e6),
+        )
+        return result
+
+    return wrapper
+
+
 def register_bp_handler(qemu: Any, intercept: Any) -> Optional[int]:
     """
     Registers a BP handler for specific address
@@ -221,6 +266,8 @@ def register_bp_handler(qemu: Any, intercept: Any) -> Optional[int]:
         hal_log.error("Input registration args are %s", intercept.registration_args)
         # exit(-1)
         sys.exit(-1)
+
+    handler = _traced_handler(handler, bp_cls, intercept)
 
     if intercept.run_once:
         bp_temp = True

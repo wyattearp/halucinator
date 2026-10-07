@@ -1856,6 +1856,14 @@ def main() -> None:
         "config files the snapshot was taken with",
     )
     parser.add_argument(
+        "--event-log",
+        default=None,
+        metavar="PATH",
+        help="Write a JSONL log of every domain crossing (firmware -> "
+        "intercept handler -> peripheral model -> external device) for "
+        "hal_trace map/flow/replay",
+    )
+    parser.add_argument(
         "-q",
         "--qemu_args",
         nargs=argparse.REMAINDER,
@@ -1864,6 +1872,11 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    event_log = args.event_log or os.environ.get("HAL_EVENT_LOG")
+    if event_log:
+        from halucinator.trace import events as trace_events
+        trace_events.enable(event_log)
 
     # Build configuration
     config = hal_config.HalucinatorConfig()
