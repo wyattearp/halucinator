@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any, Tuple, Type
 
 from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
 from halucinator.peripheral_models.utty import UTTYModel
-from halucinator.trace import events as trace_events
 
 if TYPE_CHECKING:
     from halucinator.backends.hal_backend import HalBackend
@@ -249,7 +248,6 @@ class BusPirateConsole(BPHandler):
         if self.utty_model.get_rx_buff_size("BP5") > 0:
             char = self.utty_model.get_rx_char("BP5")
             qemu.write_memory(char_ptr, 1, char)
-            trace_events.record_data("console.rx", bytes([char]), "out")
             return True, 1
         return True, 0
 
@@ -259,7 +257,6 @@ class BusPirateConsole(BPHandler):
         buffer_ptr = qemu.get_arg(1)
         bufsize = qemu.get_arg(2)
         data = qemu.read_memory(buffer_ptr, 1, bufsize, raw=True)
-        trace_events.record_data("console.tx", data, "in")
         self.utty_model.tx_buf("BP5", data)
         return True, bufsize
 

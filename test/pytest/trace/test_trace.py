@@ -1,9 +1,11 @@
-"""Tests for the event log and the domain-map / flow analysis."""
+"""Tests for the event log and the domain map / timeline."""
 import json
 
 import pytest
 
 from halucinator.trace import analyze, events
+
+STUB_MOD = "halucinator.bp_handlers.generic.common"
 
 
 @pytest.fixture
@@ -18,18 +20,27 @@ def _read(path):
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
-def test_disabled_emit_is_noop(tmp_path):
+def _icpt(seq, t, sym, module=STUB_MOD, lr=0x1000):
+    return {"seq": seq, "t": t, "kind": "intercept", "sym": sym, "pc": 0x2000, "lr": lr,
+            "cls": "C", "module": module, "fn": "f"}
+
+
+def _tx(seq, t):
+    return {"seq": seq, "t": t, "kind": "model_tx", "topic": "Peripheral.UTTYModel.tx_buf",
+            "payload": {"interface_id": "S", "chars_hex": "4142"}}
+
+
+def test_disabled_emit_is_noop():
     events.disable()
-    events.emit("intercept", "handler", sym="x")  # must not raise
+    events.emit("intercept", "handler", sym="x")
     assert not events.is_enabled()
 
 
-def test_emit_orders_and_stamps(log_path):
+def test_emit_orders_events(log_path):
     events.emit("intercept", "handler", sym="a")
-    events.emit("model_tx", "model", topic="Peripheral.X.y")
+    events.emit("model_tx", "model", topic="t")
     events.disable()
     evs = _read(log_path)
-    assert [e["kind"] for e in evs] == ["meta", "intercept", "model_tx"]
     assert [e["seq"] for e in evs] == [1, 2, 3]
     assert evs[1]["t"] <= evs[2]["t"]
 
@@ -37,102 +48,56 @@ def test_emit_orders_and_stamps(log_path):
 def test_hot_polls_fold_into_repeat(log_path):
     for _ in range(100):
         events.emit_poll("intercept", "handler", "poll", ("sig",), sym="poll")
-    events.emit("model_tx", "model", topic="t")  # flushes the summary
+    events.emit("model_tx", "model", topic="t")
     events.disable()
     evs = _read(log_path)
-    verbatim = [e for e in evs if e["kind"] == "intercept"]
-    repeat = [e for e in evs if e["kind"] == "repeat"]
-    assert len(verbatim) == events.POLL_THRESHOLD
-    assert len(repeat) == 1 and repeat[0]["count"] == 100 - events.POLL_THRESHOLD
+    assert sum(e["kind"] == "intercept" for e in evs) == events.POLL_THRESHOLD
+    assert [e["count"] for e in evs if e["kind"] == "repeat"] == [100 - events.POLL_THRESHOLD]
 
 
-def test_changed_signature_is_not_folded(log_path):
+def test_changing_signature_is_not_folded(log_path):
     for i in range(50):
         events.emit_poll("intercept", "handler", "k", (i,), sym="k")
     events.disable()
-    assert len([e for e in _read(log_path) if e["kind"] == "intercept"]) == 50
-
-
-def _intercept(seq, t, sym, cls="SkipFunc", module="halucinator.bp_handlers.generic.common",
-               lr=0x1000):
-    return {"seq": seq, "t": t, "kind": "intercept", "domain": "handler", "sym": sym,
-            "pc": 0x2000, "lr": lr, "cls": cls, "module": module, "fn": "f", "ret": 0}
+    assert sum(e["kind"] == "intercept" for e in _read(log_path)) == 50
 
 
 def test_categorize():
-    assert analyze.categorize(_intercept(1, 0, "a")) == analyze.STUB
-    assert analyze.categorize(
-        _intercept(1, 0, "a", module="halucinator.bp_handlers.generic.libc")) == analyze.HLE
-    assert analyze.categorize(
-        _intercept(1, 0, "a", module="halucinator.bp_handlers.bpv5.i2c")) == analyze.MODEL
+    assert analyze.categorize(_icpt(1, 0, "a")) == analyze.STUB
+    assert analyze.categorize(_icpt(1, 0, "a", "halucinator.bp_handlers.generic.libc")) == analyze.HLE
+    assert analyze.categorize(_icpt(1, 0, "a", "halucinator.bp_handlers.bpv5.i2c")) == analyze.MODEL
 
 
-def test_graph_clusters_and_message_path():
-    evs = [
-        _intercept(1, 0.1, "skip_me"),
-        {"seq": 2, "t": 0.2, "kind": "model_tx", "domain": "model",
-         "topic": "Peripheral.UTTYModel.tx_buf",
-         "payload": {"interface_id": "S", "chars_hex": "4142"}},
-        _intercept(3, 0.21, "printf", module="halucinator.bp_handlers.generic.libc"),
-    ]
-    graph = analyze.build_graph(evs)
-    clusters = {n.cluster for n in graph.nodes.values()}
-    assert {"firmware", "stub", "hle", "model", "device"} <= clusters
-    # model_tx emitted inside printf is attributed to printf, then to the device
-    kinds = {(e.src, e.dst) for e in graph.edges.values() if e.kind == "message"}
-    assert ("h:printf", "m:UTTYModel.tx_buf:S") in kinds
-    assert ("m:UTTYModel.tx_buf:S", "d:UTTYModel:S") in kinds
-    dot = analyze.to_dot(graph)
-    assert dot.startswith("digraph") and "cluster_stub" in dot
+def test_graph_attributes_tx_to_next_intercept_and_device():
+    evs = [_icpt(1, .1, "skip_me"), _tx(2, .2),
+           _icpt(3, .21, "printf", "halucinator.bp_handlers.generic.libc")]
+    nodes, edges = analyze.build_graph(evs)
+    assert {n[1] for n in nodes.values()} == {"firmware", "stub", "hle", "model", "device"}
+    assert ("h:printf", "m:UTTYModel.tx_buf:S") in edges
+    assert ("m:UTTYModel.tx_buf:S", "d:UTTYModel:S") in edges
+    assert "cluster_stub" in analyze.to_dot(nodes, edges)
 
 
-def test_repeat_counts_fold_into_node():
-    evs = [_intercept(1, 0.1, "poll"),
-           {"seq": 2, "t": 0.2, "kind": "repeat", "domain": "tool", "of": "poll",
-            "count": 500, "t_first": 0.1, "t_last": 0.2}]
-    graph = analyze.build_graph(evs)
-    assert graph.nodes["h:poll"].count == 501
+def test_repeat_counts_fold_into_node_and_edge():
+    evs = [_icpt(1, .1, "poll"), {"seq": 2, "t": .2, "kind": "repeat", "of": "poll", "count": 500}]
+    nodes, edges = analyze.build_graph(evs)
+    assert nodes["h:poll"][2] == 501
+    assert edges[("fw:<unknown caller>", "h:poll")] == 501
 
 
 def test_symbol_lookup_nearest_below(tmp_path):
     yml = tmp_path / "s.yaml"
     yml.write_text("symbols:\n  4096: foo\n  8192: bar\n")
-    table = analyze.SymbolTable()
-    table.add_yaml(str(yml))
-    assert table.lookup(4100) == "foo"
-    assert table.lookup(8193) == "bar"   # thumb bit ignored
-    assert table.lookup(10) is None
-
-
-def _rx(seq, t, hexval):
-    return {"seq": seq, "t": t, "kind": "model_rx", "domain": "device",
-            "topic": "Peripheral.UTTYModel.rx_char_or_buf",
-            "payload": {"interface_id": "S", "chars_hex": hexval}}
-
-
-def _tx(seq, t, hexval):
-    return {"seq": seq, "t": t, "kind": "model_tx", "domain": "model",
-            "topic": "Peripheral.UTTYModel.tx_buf",
-            "payload": {"interface_id": "S", "chars_hex": hexval}}
-
-
-def test_value_links_exact_copy():
-    evs = [_rx(1, 0.0, "68656c6c6f"), _tx(2, 0.1, "68656c6c6f")]
-    assert analyze.find_links(evs) == [(1, 2, "68656c6c6f")]
-
-
-def test_value_links_ignore_short_coincidences_and_stale():
-    assert analyze.find_links([_rx(1, 0, "1b"), _tx(2, 0.1, "1b")]) == []
-    assert analyze.find_links([_rx(1, 0, "1b"), _tx(2, 0.1, "1b")], min_run=1)
-    stale = [_rx(1, 0.0, "68656c6c6f"), _tx(2, 30.0, "68656c6c6f")]
-    assert analyze.find_links(stale) == []
-
-
-def test_follow_forward_chain():
-    evs = [_rx(1, 0, "aabb"), _tx(2, 0.1, "aabb")]
-    assert analyze.follow(evs, 1) == [1, 2]
+    table = analyze.SymbolTable(str(yml))
+    assert (table.lookup(4100), table.lookup(8193), table.lookup(10)) == ("foo", "bar", None)
 
 
 def test_crossings_rows():
-    rows = analyze.crossings([_intercept(1, 0.1, "x"), _tx(2, 0.2, "41")])
-    assert rows[0]["to"] == "stub:x" and rows[1]["to"] == "device:S"
+    rows = analyze.crossings([_icpt(1, .1, "x"), _tx(2, .2)])
+    assert rows[0]["to"] == "stub:x" and rows[1]["to"] == "device:S" and "4142" in rows[1]["via"]
+
+
+def test_text_payload_is_shown_as_hex():
+    ev = {"seq": 1, "t": 0.0, "kind": "model_rx", "topic": "Peripheral.UARTPublisher.rx_data",
+          "payload": {"chars": "12", "id": 1}}
+    assert "3132" in analyze.crossings([ev])[0]["via"]

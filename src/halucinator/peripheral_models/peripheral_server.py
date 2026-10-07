@@ -57,22 +57,20 @@ Publisher = TypeVar("Publisher")
 
 
 def _trace_payload(data: Any) -> Any:
-    """JSON-safe copy of a message payload for the event log, with byte-like
-    values hex-encoded under ``<key>_hex`` so flow analysis can match them."""
-    if isinstance(data, dict):
-        out = {}
-        for key, val in data.items():
-            if isinstance(val, (bytes, bytearray)):
-                out[f"{key}_hex"] = trace_events.to_hex(val)
-            elif isinstance(val, (list, tuple)) and val and all(
-                    isinstance(v, int) and 0 <= v < 256 for v in val):
-                out[f"{key}_hex"] = bytes(val).hex()
-            elif isinstance(val, int) and 0 <= val < 256 and key in ("char", "chars"):
-                out[f"{key}_hex"] = format(val, "02x")
-            else:
-                out[key] = val
-        return out
-    return data
+    """Copy of a message payload for the event log: bytes/int-list values are
+    hex-encoded under ``<key>_hex`` (capped) so the trace stays readable."""
+    if not isinstance(data, dict):
+        return data
+    out = {}
+    for key, val in data.items():
+        if isinstance(val, (bytes, bytearray)):
+            out[f"{key}_hex"] = bytes(val[:trace_events.MAX_PAYLOAD_BYTES]).hex()
+        elif isinstance(val, (list, tuple)) and val and all(
+                isinstance(v, int) and 0 <= v < 256 for v in val):
+            out[f"{key}_hex"] = bytes(val[:trace_events.MAX_PAYLOAD_BYTES]).hex()
+        else:
+            out[key] = val
+    return out
 
 
 def peripheral_model(cls: Type[Publisher]) -> Type[Publisher]:

@@ -40,7 +40,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Tuple
 
 from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
-from halucinator.trace import events as trace_events
 
 if TYPE_CHECKING:
     from halucinator.backends.hal_backend import HalBackend
@@ -161,7 +160,6 @@ class I2cEepromTarget(BPHandler):
         address scan and the write phase behave correctly.
         """
         byte = qemu.get_arg(0) & 0xFF
-        trace_events.record_data("i2c.mosi", bytes([byte]), "in")
 
         if self._phase is None:
             # This is the control byte: addr<<1 | rw.
@@ -217,7 +215,6 @@ class I2cEepromTarget(BPHandler):
             # No device addressed for read — bus floats high (0xFF).
             val = 0xFF
         qemu.write_memory(dst, 1, val)
-        trace_events.record_data("i2c.miso", bytes([val]), "out")
         print(f"[I2cEepromTarget] MISO=0x{val:02X} @0x{(self._ptr - 1) & 0xFF:02X}",
               flush=True)
         return True, _OK

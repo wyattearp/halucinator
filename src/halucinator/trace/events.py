@@ -8,7 +8,6 @@ point where execution or data moves between domains:
 * ``model_tx``   peripheral model -> external device (ZMQ)
 * ``model_rx``   external device -> peripheral model (ZMQ)
 * ``irq``        peripheral/model -> firmware interrupt injection
-* ``data``       a handler declaring bytes it moved (see :func:`record_data`)
 
 Every event carries ``seq`` (strict ordering) and ``t`` (seconds since the log
 was opened, monotonic) so a trace can be replayed at any speed.  When no log is
@@ -128,32 +127,6 @@ def _write(kind: str, domain: str, fields: Dict[str, Any]) -> None:
         "domain": domain,
     }
     event.update(fields)
-    _out.write(json.dumps(event, default=_json_default) + "\n")
+    _out.write(json.dumps(event, default=repr) + "\n")
     _out.flush()
 
-
-def to_hex(value: Any) -> Optional[str]:
-    """Hex-encode bytes-like or int payloads (truncated); None for others."""
-    if isinstance(value, (bytes, bytearray)):
-        return bytes(value[:MAX_PAYLOAD_BYTES]).hex()
-    if isinstance(value, int) and not isinstance(value, bool):
-        return format(value & 0xFFFFFFFF, "x")
-    return None
-
-
-def record_data(label: str, value: Any, direction: str, **fields: Any) -> None:
-    """Declare data a handler moved, for flow tracing.
-
-    *direction* is ``"in"`` (data consumed from the firmware side) or
-    ``"out"`` (data produced toward the firmware side).  Flow analysis links an
-    ``out`` to a later ``in`` carrying the same bytes.
-    """
-    if _out is None:
-        return
-    emit("data", "handler", label=label, dir=direction, hex=to_hex(value), **fields)
-
-
-def _json_default(obj: Any) -> Any:
-    if isinstance(obj, (bytes, bytearray)):
-        return {"hex": bytes(obj[:MAX_PAYLOAD_BYTES]).hex()}
-    return repr(obj)
