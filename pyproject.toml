@@ -162,6 +162,7 @@ dev = [
 halucinator = "halucinator.main:main"
 halucinator-mcp = "halucinator.mcp.server:main"
 qemulog2trace = "halucinator.tools.qemu_to_trace:main"
+hal_trace = "halucinator.trace.cli:main"
 hal_make_addr = "halucinator.util.elf_sym_hal_getter:main"
 hal_dev_uart = "halucinator.external_devices.uart:main"
 hal_dev_virt_hub = "halucinator.external_devices.ethernet_virt_hub:main"
