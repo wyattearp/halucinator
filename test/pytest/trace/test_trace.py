@@ -69,7 +69,8 @@ def test_symbol_lookup(tmp_path):
     yml = tmp_path / "s.yaml"
     yml.write_text("symbols:\n  4096: foo\n  8192: bar\n")
     symbols = analyze.load_symbols([str(yml)])
-    assert [analyze.symbol_at(symbols, a) for a in (4100, 8193, 10)] == ["foo", "bar", "<unknown caller>"]
+    assert [analyze.symbol_at(symbols, a) for a in (4100, 8193, 10, 0x356)] == ["foo", "bar", "<boot ROM>", "<boot ROM>"]
+    assert analyze.symbol_at([], 4100) == analyze.symbol_at(symbols, None) == "<unknown caller>"
 
 
 def test_graph_clusters_message_path_and_folded_polls():

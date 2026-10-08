@@ -49,5 +49,5 @@ the first byte arrived show up as roots.
 * Memory-mapped peripherals (the bpv5 NMEA UART source) bypass handlers, so their data is neither
   logged nor tagged. Firmware between two intercepts is only seen through `taint_code`.
 * Caller and function names use the nearest symbol below an address (approximate); addresses
-  below the first symbol (boot ROM) show as `<unknown caller>`. In a bpv5 UART run, 237 of 239
+  below the lowest symbol are drawn as one `<boot ROM>` node (`<unknown caller>` when no symbols were given). In a bpv5 UART run, 237 of 239
   recorded call targets were exact function-entry symbols; the rest were boot-ROM addresses.

@@ -35,9 +35,12 @@ def load_symbols(paths: List[str]) -> List[Tuple[int, str]]:
 
 
 def symbol_at(symbols: List[Tuple[int, str]], addr: Optional[int]) -> str:
-    """Nearest symbol at or below addr (no sizes, so approximate)."""
-    idx = bisect.bisect_right(symbols, ((addr or 0) & ~1, "\U0010ffff")) - 1
-    return symbols[idx][1] if addr is not None and idx >= 0 else "<unknown caller>"
+    """Nearest symbol at or below addr (no sizes, so approximate). Addresses below the
+    lowest symbol are boot ROM: one node for all of them."""
+    if addr is None or not symbols:
+        return "<unknown caller>"
+    idx = bisect.bisect_right(symbols, (addr & ~1, "\U0010ffff")) - 1
+    return symbols[idx][1] if idx >= 0 else "<boot ROM>"
 
 
 def category(event: Event) -> str:
