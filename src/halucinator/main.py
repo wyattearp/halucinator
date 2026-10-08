@@ -1855,14 +1855,8 @@ def main() -> None:
         "from the checkpoint instead of the reset vector. Use the same "
         "config files the snapshot was taken with",
     )
-    parser.add_argument(
-        "--event-log",
-        default=None,
-        metavar="PATH",
-        help="Write a JSONL log of every domain crossing (firmware -> "
-        "intercept handler -> peripheral model -> external device) for "
-        "hal_trace map/flow/replay",
-    )
+    parser.add_argument("--event-log", metavar="PATH",
+                        help="write a JSONL log of domain crossings (see doc/tracing.md)")
     parser.add_argument(
         "-q",
         "--qemu_args",

@@ -57,23 +57,6 @@ OUTPUT_DIRECTORY: Optional[str] = None
 Publisher = TypeVar("Publisher")
 
 
-def _trace_payload(data: Any) -> Any:
-    """Copy of a message payload for the event log: bytes/int-list values are
-    hex-encoded under ``<key>_hex`` (capped) so the trace stays readable."""
-    if not isinstance(data, dict):
-        return data
-    out = {}
-    for key, val in data.items():
-        if isinstance(val, (bytes, bytearray)):
-            out[f"{key}_hex"] = bytes(val[:trace_events.MAX_PAYLOAD_BYTES]).hex()
-        elif isinstance(val, (list, tuple)) and val and all(
-                isinstance(v, int) and 0 <= v < 256 for v in val):
-            out[f"{key}_hex"] = bytes(val[:trace_events.MAX_PAYLOAD_BYTES]).hex()
-        else:
-            out[key] = val
-    return out
-
-
 def peripheral_model(cls: Type[Publisher]) -> Type[Publisher]:
     """
     Decorator which registers classes as peripheral models
@@ -119,8 +102,7 @@ def tx_msg(funct: CallableVar) -> CallableVar:
         topic = f"Peripheral.{model_cls.__name__}.{funct.__name__}"
         msg = encode_zmq_msg(topic, data)
         log.info("Sending: %s", msg)
-        trace_events.emit("model_tx", "model", topic=topic,
-                          payload=_trace_payload(data))
+        trace_events.emit("model_tx", topic=topic, payload=data)
         __TX_SOCKET__.send_string(msg)
 
     return cast(CallableVar, tx_msg_decorator)
@@ -268,7 +250,7 @@ def trigger_interrupt(irq_num: int, source: Optional[str] = None) -> None:
     instead (issue #31).
     """
     log.info("Triggering interrupt %s (source=%s)", irq_num, source)
-    trace_events.emit("irq", "device", irq=irq_num, source=source)
+    trace_events.emit("irq", irq=irq_num, source=source)
     inject_irq(irq_num)
 
 
@@ -376,8 +358,7 @@ def run_server() -> None:
             topic, msg = decode_zmq_msg(string)
             log.info("Got message: Topic %s  Msg: %s", str(topic), str(msg))
             print(f"Got message: Topic {topic}  Msg: {msg}")
-            trace_taint.feed(trace_events.emit("model_rx", "device", topic=topic,
-                                               payload=_trace_payload(msg)),
+            trace_taint.feed(trace_events.emit("model_rx", topic=topic, payload=msg),
                              trace_taint.payload_bytes(msg))
             if topic.startswith("Peripheral"):
                 if topic in __RX_HANDLERS__:
