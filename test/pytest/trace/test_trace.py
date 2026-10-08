@@ -76,7 +76,7 @@ def test_graph_clusters_message_path_and_folded_polls():
     tx = {"seq": 2, "t": .2, "kind": "model_tx", "topic": "Peripheral.U.tx", "payload": {"interface_id": "S"}}
     evs = [icpt(1, "skip"), tx, icpt(3, "printf", "halucinator.bp_handlers.generic.libc"),
            {"seq": 4, "t": .4, "kind": "repeat", "of": "skip", "count": 500}]
-    nodes, edges, _ = analyze.build_graph(evs)
+    nodes, edges, *_ = analyze.build_graph(evs)
     assert {n[1] for n in nodes.values()} == {"firmware", "stub", "hle", "model", "device"}
     assert ("h:printf", "m:U.tx:S") in edges and ("m:U.tx:S", "d:U:S") in edges   # tx belongs to printf
     assert nodes["h:skip"][2] == 501 and edges[("fw:<unknown caller>", "h:skip")] == 501
@@ -112,7 +112,7 @@ def test_taint_edges_end_marker_and_lost_report():
     rx = {"seq": 1, "t": 0, "kind": "model_rx", "topic": "Peripheral.U.rx", "payload": {}}
     src = {"seq": 2, "t": .1, "kind": "taint_src", "handler": "rx_h", "len": 4, "tags": [1]}
     sink = {"seq": 3, "t": .2, "kind": "taint_sink", "handler": "tx_h", "len": 4, "tainted": 4, "tags": [1]}
-    _, _, edges = analyze.build_graph([rx, src, sink])
+    _, _, edges, _ = analyze.build_graph([rx, src, sink])
     assert edges == {("m:U.rx:", "h:rx_h"): 4, ("h:rx_h", "h:tx_h"): 4}
     assert analyze.taint_report([rx, src, sink])[0]["sinks"][0]["handler"] == "tx_h"
     assert analyze.taint_report([rx, src])[0]["sinks"] == []                 # lost
@@ -162,3 +162,19 @@ def test_handler_reading_a_tagged_arg_is_a_sink_and_entry_logs_the_code_path(log
     code, sink = read(log, "taint_code", "taint_sink")
     assert code["pcs"] == [0x1000, 0x1004] and (sink["handler"], sink["tags"], sink["reg"]) == ("printf", [4], True)
     assert "get_arg" not in vars(cpu)
+
+
+def test_taint_path_is_the_call_path_between_touched_functions_not_a_chain():
+    symbols = [(0x1000, "A"), (0x2000, "B"), (0x3000, "C")]
+    ev = lambda seq, kind, **f: {"seq": seq, "t": seq / 10, "kind": kind, **f}      # noqa: E731
+    sink_icpt = icpt(9, "tx_h")
+    sink_icpt["pc"] = 0x9000
+    evs = [ev(1, "model_rx", topic="Peripheral.U.rx", payload={}),
+           ev(2, "taint_src", handler="rx_h", len=1, tags=[1]),
+           ev(3, "taint_code", tag=1, pcs=[0x1004, 0x3008]),               # touched A and C, not B
+           ev(4, "taint_call", calls=[[0x1010, 0x2000], [0x2010, 0x3000], [0x3010, 0x9000]]),
+           sink_icpt, ev(5, "taint_sink", handler="tx_h", len=1, tainted=1, tags=[1])]
+    _, _, edges, marks = analyze.build_graph(evs, symbols)
+    assert edges[("fw:A", "fw:C")] == 0 and edges[("fw:C", "h:tx_h")] == 0   # A -> B -> C contracted
+    assert ("fw:A", "fw:B") not in edges and ("fw:B", "fw:C") not in edges
+    assert edges[("m:U.rx:", "h:rx_h")] == 1 and marks["fw:C"] == "touched" and "ends" not in marks.values()

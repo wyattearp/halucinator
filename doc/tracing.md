@@ -25,16 +25,19 @@ tagged register argument through `get_arg`, is the sink (`taint_sink`).
 On a **Unicorn Cortex-M** target a per-instruction hook (armed after the first tagged byte is
 stored) also follows the tag through firmware: loads and stores move it between shadow memory and
 registers, ALU ops union their source registers, constants clear it. The firmware instructions it
-passes through are logged as `taint_code` and drawn as red dashed edges through the functions that
-touched it (in order of first contact; this is not the call graph). A red-bordered node marks where
-a tag arrives but never leaves.
+passes through are logged as `taint_code`, and the `bl`/`blx` calls executed while taint is live as
+`taint_call`. The map outlines every function the taint touched and joins them with red "calls" edges
+(the real call path, skipping untouched callees in between). Dashed red edges are data a handler
+moved. A thick red node marks where a tag stopped and never reached a sink.
 
 ```
 hal_trace taint run.jsonl -c addrs.yaml   # per input: stored by / passed through / read out by, or LOST
 ```
 
-Example, bpv5 I2C: typed `[0xA0 0x00 [0xA1 r:2]` passes through the shell's command-line parser and
-reaches `pio_i2c_write_timeout` carrying 3 of 3 bytes.
+Example, bpv5 I2C: typed `[0xA0 0x00 [0xA1 r:2]` reaches `pio_i2c_write_timeout` carrying 3 of 3
+bytes, via `main -> ui_process_commands -> ui_process_syntax -> syntax_run -> syntax_run_write ->
+hwi2c_write`. Call edges are only recorded while taint is live; functions already on the stack when
+the first byte arrived show up as roots.
 
 ## Limits
 
@@ -46,4 +49,5 @@ reaches `pio_i2c_write_timeout` carrying 3 of 3 bytes.
 * Memory-mapped peripherals (the bpv5 NMEA UART source) bypass handlers, so their data is neither
   logged nor tagged. Firmware between two intercepts is only seen through `taint_code`.
 * Caller and function names use the nearest symbol below an address (approximate); addresses
-  below the first symbol (boot ROM) show as `<unknown caller>`.
+  below the first symbol (boot ROM) show as `<unknown caller>`. In a bpv5 UART run, 237 of 239
+  recorded call targets were exact function-entry symbols; the rest were boot-ROM addresses.

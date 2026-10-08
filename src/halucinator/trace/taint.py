@@ -8,7 +8,8 @@ records a taint_sink.
 On a Unicorn Cortex-M target, arm() adds a per-instruction hook so the tag also
 follows the data through firmware code: loads and stores move it between shadow
 memory and registers, ALU ops union their source registers. The firmware
-instructions it passes through are logged as taint_code. Not followed: control
+instructions it passes through are logged as taint_code, and the calls (bl/blx) it
+executes while taint is live as taint_call. Not followed: control
 dependence (a branch on tainted data), tainted pointers, and handlers that copy
 memory on the firmware's behalf (memcpy intercepts).
 """
@@ -19,6 +20,7 @@ from typing import Any, Dict, Iterator, Optional
 
 import capstone
 from capstone import arm_const as A
+from unicorn import arm_const as UA
 from unicorn import unicorn_const
 
 from halucinator.trace import events
@@ -118,8 +120,10 @@ def watch(target: Any, handler: Optional[str]) -> Iterator[None]:
 _md = capstone.Cs(capstone.CS_ARCH_ARM, capstone.CS_MODE_THUMB | capstone.CS_MODE_MCLASS)
 _md.detail = True
 _SKIP = (A.ARM_REG_CPSR, A.ARM_REG_PC)  # flags and pc are not tracked
-_decoded: Dict[int, tuple] = {}   # address -> (kind, reads, writes, data regs, destination regs)
+_decoded: Dict[int, tuple] = {}   # address -> (kind, reads, writes, data regs, destination regs, call)
 _cur: Optional[list] = None       # instruction in flight: [address, decoded, source taint, memory-read taints]
+_new_calls: list = []             # (call site, target) pairs not yet logged
+_sent_calls: set = set()
 _armed_uc = None
 _ARG_REGS = (A.ARM_REG_R0, A.ARM_REG_R1, A.ARM_REG_R2, A.ARM_REG_R3)
 
@@ -127,13 +131,16 @@ _ARG_REGS = (A.ARM_REG_R0, A.ARM_REG_R1, A.ARM_REG_R2, A.ARM_REG_R3)
 def _decode(code: bytes, address: int) -> tuple:
     insn = next(_md.disasm(code, address), None)
     if insn is None:
-        return ("op", (), (), (), ())
+        return ("op", (), (), (), (), None)
     name = insn.mnemonic
+    call = None  # (is register, immediate target or register id) for bl / blx
+    if name in ("bl", "blx") and insn.operands:
+        call = (insn.operands[0].type == A.ARM_OP_REG, insn.operands[0].reg if insn.operands[0].type == A.ARM_OP_REG else insn.operands[0].imm)
     kind = "ld" if name.startswith(("ldr", "ldm", "pop")) else "st" if name.startswith(("str", "stm", "push")) else "op"
     regs = [o for o in insn.operands if o.type == A.ARM_OP_REG][name.startswith(("ldm", "stm")):]  # first is the base
     reads, writes = (tuple(r for r in rw if r not in _SKIP) for rw in insn.regs_access())
     return (kind, reads, writes, tuple(o.reg for o in regs if o.access & 1 and o.reg not in _SKIP),
-            tuple(o.reg for o in regs if o.access & 2 and o.reg not in _SKIP))
+            tuple(o.reg for o in regs if o.access & 2 and o.reg not in _SKIP), call)
 
 
 def _set_reg(reg: int, tags: frozenset) -> None:
@@ -148,7 +155,7 @@ def _finish() -> None:
     global _cur  # pylint: disable=global-statement
     if _cur is None:
         return
-    address, (kind, reads, writes, _, dsts), tags, loaded = _cur
+    address, (kind, reads, writes, _, dsts, _), tags, loaded = _cur
     _cur = None
     if kind == "ld":
         for k, reg in enumerate(dsts):
@@ -169,7 +176,12 @@ def _on_code(uc: Any, address: int, size: int, _: Any) -> None:
     info = _decoded.get(address)
     if info is None:
         info = _decoded[address] = _decode(bytes(uc.mem_read(address, size)), address)
-    kind, reads, _, data, _ = info
+    kind, reads, _, data, _, call = info
+    if call:
+        target = (uc.reg_read(getattr(UA, "UC_ARM_REG_" + _md.reg_name(call[1]).upper())) if call[0] else call[1]) & ~1
+        if (address, target) not in _sent_calls:
+            _sent_calls.add((address, target))
+            _new_calls.append((address, target))
     _cur = [address, info, _NONE.union(*(_rt.get(r, _NONE) for r in (reads if kind == "op" else ()))), []]
 
 
@@ -223,3 +235,6 @@ def _enter(target: Any) -> None:
     for tag, pcs in _touched.items():
         events.emit("taint_code", tag=tag, pcs=list(pcs)[:2000])
     _touched.clear()
+    if _new_calls:
+        events.emit("taint_call", calls=[list(c) for c in _new_calls])
+        _new_calls.clear()

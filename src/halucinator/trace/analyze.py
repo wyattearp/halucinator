@@ -55,8 +55,10 @@ def topic(event: Event) -> Tuple[str, str]:
 
 
 def build_graph(events: List[Event], symbols: Optional[List[Tuple[int, str]]] = None):
-    """Returns (nodes: id -> [label, cluster, count], edges, taint_edges); edges map
-    (src, dst) -> count (taint_edges: tainted bytes).
+    """Returns (nodes: id -> [label, cluster, count], edges, taint_edges, marks); edges map
+    (src, dst) -> count. taint_edges: tainted bytes moved by a handler (0 = a call between two
+    functions the taint touched, skipping untouched callees in between). marks: node ->
+    "touched" or "ends" (a tag arrived and never reached a sink).
 
     A model_tx is logged from inside the handler that produced it, just before
     that handler's own intercept event, so pending tx nodes belong to the next one.
@@ -66,6 +68,11 @@ def build_graph(events: List[Event], symbols: Optional[List[Tuple[int, str]]] = 
     taint_edges: Dict[Tuple[str, str], int] = defaultdict(int)
     rx_node: Dict[int, str] = {}                   # tag (model_rx seq) -> model node
     last: Dict[int, str] = {}                      # tag -> node its data was most recently seen in
+    sunk: set = set()                              # tags that reached a handler sink
+    touched: set = set()                           # nodes the taint was seen in
+    callees: Dict[str, set] = defaultdict(set)     # call graph from taint_call events
+    handler_at = {e["pc"]: f"h:{e['sym']}" for e in events if e["kind"] == "intercept" and e["sym"]}
+    syms = symbols or []
     pending: List[str] = []
 
     def node(ident: str, label: str, cluster: str) -> None:
@@ -76,7 +83,7 @@ def build_graph(events: List[Event], symbols: Optional[List[Tuple[int, str]]] = 
         if kind == "intercept":
             ident = f"h:{ev['sym'] or hex(ev['pc'])}"
             node(ident, f"{ev['sym']}\\n{ev['cls']}.{ev['fn']}", category(ev))
-            caller = f"fw:{symbol_at(symbols or [], ev['lr'])}"
+            caller = f"fw:{symbol_at(syms, ev['lr'])}"
             node(caller, caller[3:], "firmware")
             edges[(caller, ident)] += 1
             for tx in pending:
@@ -93,20 +100,25 @@ def build_graph(events: List[Event], symbols: Optional[List[Tuple[int, str]]] = 
             else:
                 rx_node[ev["seq"]] = model
         elif kind == "taint_src":
+            touched.add(f"h:{ev['handler']}")
             for tag in ev["tags"]:
                 if tag in rx_node:
                     taint_edges[(rx_node[tag], f"h:{ev['handler']}")] += ev["len"]
                 last[tag] = f"h:{ev['handler']}"
-        elif kind == "taint_code":  # firmware functions the tagged data passed through, in order
-            for func in dict.fromkeys(symbol_at(symbols or [], pc) for pc in ev["pcs"]):
+        elif kind == "taint_code":  # firmware functions the tagged data passed through
+            for func in dict.fromkeys(symbol_at(syms, pc) for pc in ev["pcs"]):
                 nodes.setdefault(f"fw:{func}", [func, "firmware", 0])
-                if last.get(ev["tag"]) not in (None, f"fw:{func}"):
-                    taint_edges[(last[ev["tag"]], f"fw:{func}")] += 0
+                touched.add(f"fw:{func}")
                 last[ev["tag"]] = f"fw:{func}"
+        elif kind == "taint_call":
+            for site, target in ev["calls"]:
+                callees[f"fw:{symbol_at(syms, site)}"].add(handler_at.get(target) or f"fw:{symbol_at(syms, target)}")
         elif kind == "taint_sink":
+            touched.add(f"h:{ev['handler']}")
             for tag in ev["tags"]:
-                if tag in last and last[tag] != f"h:{ev['handler']}":
-                    taint_edges[(last[tag], f"h:{ev['handler']}")] += ev["tainted"]
+                if last.get(tag, "").startswith("h:") and last[tag] != f"h:{ev['handler']}":
+                    taint_edges[(last[tag], f"h:{ev['handler']}")] += ev["tainted"]  # nothing between the handlers
+                sunk.add(tag)
                 last[tag] = f"h:{ev['handler']}"
         elif kind == "irq":
             node(f"d:irq:{ev['source']}", f"IRQ source\\n{ev['source']}", "device")
@@ -116,12 +128,23 @@ def build_graph(events: List[Event], symbols: Optional[List[Tuple[int, str]]] = 
             nodes[f"h:{ev['of']}"][2] += ev["count"]
             for edge in [e for e in edges if e[1] == f"h:{ev['of']}"]:
                 edges[edge] += ev["count"]
-    return nodes, edges, taint_edges
+    for src in touched:  # call path: touched -> touched, passing through untouched callees
+        seen, stack = {src}, list(callees[src])
+        while stack:
+            node_id = stack.pop()
+            if node_id not in seen:
+                seen.add(node_id)
+                if node_id in touched:
+                    taint_edges[(src, node_id)] += 0
+                else:
+                    stack.extend(callees[node_id])
+    marks = {n: "touched" for n in touched}
+    marks.update({last[tag]: "ends" for tag in last if tag not in sunk})
+    return nodes, edges, taint_edges, marks
 
 
-def to_dot(nodes, edges, taint_edges=None) -> str:
-    taint_edges = taint_edges or {}
-    ends = {d for _, d in taint_edges} - {s for s, _ in taint_edges}  # taint arrives, never leaves
+def to_dot(nodes, edges, taint_edges=None, marks=None) -> str:
+    taint_edges, marks = taint_edges or {}, marks or {}
     out = ["digraph halucinator {", "  rankdir=LR; compound=true; fontname=Helvetica;",
            "  node [shape=box, fontname=Helvetica, fontsize=10];",
            "  edge [fontname=Helvetica, fontsize=9];"]
@@ -130,15 +153,14 @@ def to_dot(nodes, edges, taint_edges=None) -> str:
         if members:
             out.append(f'  subgraph cluster_{cluster} {{ label="{title}"; style=rounded;')
             for ident, (label, _, count) in members:
-                end = ident in ends
-                out.append(f'    "{ident}" [label="{label}\\n×{count}' + ("\\n⚑ taint ends here" if end else "")
-                           + f'", {style}' + (', color="#c0392b", penwidth=3' if end else "") + "];")
+                mark = marks.get(ident)
+                out.append(f'    "{ident}" [label="{label}\\n×{count}' + ("\\n⚑ taint ends here" if mark == "ends" else "")
+                           + f'", {style}' + (', color="#c0392b", penwidth=%d' % (3 if mark == "ends" else 2) if mark else "") + "];")
             out.append("  }")
     out += [f'  "{s}" -> "{d}" [label="{c}"];' for (s, d), c in edges.items()]
-    for (s, d), n in taint_edges.items():  # n = tainted bytes, or 0 for a firmware-function hop
-        label = f"taint {n}B" if n else "taint"
-        out.append(f'  "{s}" -> "{d}" [label="{label}", color="#c0392b", fontcolor="#c0392b", '
-                   "style=dashed, penwidth=2];")
+    for (s, d), n in taint_edges.items():  # n = tainted bytes moved by a handler; 0 = a call
+        out.append(f'  "{s}" -> "{d}" [label="{f"taint {n}B" if n else "calls"}", color="#c0392b", '
+                   f'fontcolor="#c0392b", style={"dashed" if n else "solid"}, penwidth=2];')
     return "\n".join(out + ["}"]) + "\n"
 
 
