@@ -52,11 +52,15 @@ def _timeline(args: argparse.Namespace) -> int:
 
 
 def _taint(args: argparse.Namespace) -> int:
-    for row in analyze.taint_report(_load(args)):
+    for row in analyze.taint_report(_load(args), analyze.load_symbols(args.config)):
         if not row["stored"]:
             continue
         print(f"tag #{row['tag']} {row['source']} @{row['t']:.4f}s")
         for label, hits in (("stored by", row["stored"]), ("read out by", row["sinks"])):
+            if label == "read out by" and row["through"]:
+                names = row["through"]
+                print(f"    passed through {len(names)} firmware functions: {', '.join(names[:10])}"
+                      + (" ..." if len(names) > 10 else ""))
             for handler in dict.fromkeys(h["handler"] for h in hits):
                 group = [h for h in hits if h["handler"] == handler]
                 print(f"    {label:<11} {handler} x{len(group)} ({sum(h['bytes'] for h in group)}/{sum(h['of'] for h in group)} B) "

@@ -19,12 +19,31 @@ return address (nearest symbol below it, so approximate).
 ## Taint
 
 Bytes from a device are tagged with their `model_rx` event number. A handler that stores them in
-guest memory records the tag; a handler that later reads them out is the sink. The map shows this
-as red dashed edges, and a red-bordered "taint ends here" node where a tag arrives but never leaves.
+guest memory records the tag (`taint_src`); a handler that later reads tagged bytes, or reads a
+tagged register argument through `get_arg`, is the sink (`taint_sink`).
 
-Only handler memory accesses are seen. When firmware itself copies or parses the data between two
-handlers (the bpv5 shell consuming typed keystrokes) the tag is reported **LOST**: that is where
-the data left the traceable boundary. The shadow map cannot see firmware overwriting memory, so a reused address keeps a stale tag:
-a read-out like `1/64 B` is probably that, not a real flow. Memory-mapped peripherals (the bpv5 NMEA UART source)
-bypass handlers, so their data is neither logged nor tagged. Firmware between two intercepts is
-not traced.
+On a **Unicorn Cortex-M** target a per-instruction hook (armed after the first tagged byte is
+stored) also follows the tag through firmware: loads and stores move it between shadow memory and
+registers, ALU ops union their source registers, constants clear it. The firmware instructions it
+passes through are logged as `taint_code` and drawn as red dashed edges through the functions that
+touched it (in order of first contact; this is not the call graph). A red-bordered node marks where
+a tag arrives but never leaves.
+
+```
+hal_trace taint run.jsonl -c addrs.yaml   # per input: stored by / passed through / read out by, or LOST
+```
+
+Example, bpv5 I2C: typed `[0xA0 0x00 [0xA1 r:2]` passes through the shell's command-line parser and
+reaches `pio_i2c_write_timeout` carrying 3 of 3 bytes.
+
+## Limits
+
+* Not followed: control dependence (a branch on tagged data), tagged pointers/indices, IT-block
+  conditional execution, and handlers that copy memory for the firmware (e.g. a memcpy intercept).
+  Over-tainting is possible; a read-out like `1/64 B` is probably stale taint, since firmware
+  overwriting memory is only seen while the instruction hook is armed.
+* Other backends and architectures get handler-boundary taint only.
+* Memory-mapped peripherals (the bpv5 NMEA UART source) bypass handlers, so their data is neither
+  logged nor tagged. Firmware between two intercepts is only seen through `taint_code`.
+* Caller and function names use the nearest symbol below an address (approximate); addresses
+  below the first symbol (boot ROM) show as `<unknown caller>`.

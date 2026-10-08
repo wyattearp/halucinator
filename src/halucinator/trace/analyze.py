@@ -65,7 +65,7 @@ def build_graph(events: List[Event], symbols: Optional[List[Tuple[int, str]]] = 
     edges: Dict[Tuple[str, str], int] = defaultdict(int)
     taint_edges: Dict[Tuple[str, str], int] = defaultdict(int)
     rx_node: Dict[int, str] = {}                   # tag (model_rx seq) -> model node
-    stored_by: Dict[int, set] = defaultdict(set)   # tag -> handler nodes that stored it
+    last: Dict[int, str] = {}                      # tag -> node its data was most recently seen in
     pending: List[str] = []
 
     def node(ident: str, label: str, cluster: str) -> None:
@@ -94,13 +94,20 @@ def build_graph(events: List[Event], symbols: Optional[List[Tuple[int, str]]] = 
                 rx_node[ev["seq"]] = model
         elif kind == "taint_src":
             for tag in ev["tags"]:
-                stored_by[tag].add(f"h:{ev['handler']}")
                 if tag in rx_node:
                     taint_edges[(rx_node[tag], f"h:{ev['handler']}")] += ev["len"]
+                last[tag] = f"h:{ev['handler']}"
+        elif kind == "taint_code":  # firmware functions the tagged data passed through, in order
+            for func in dict.fromkeys(symbol_at(symbols or [], pc) for pc in ev["pcs"]):
+                nodes.setdefault(f"fw:{func}", [func, "firmware", 0])
+                if last.get(ev["tag"]) not in (None, f"fw:{func}"):
+                    taint_edges[(last[ev["tag"]], f"fw:{func}")] += 0
+                last[ev["tag"]] = f"fw:{func}"
         elif kind == "taint_sink":
             for tag in ev["tags"]:
-                for src in stored_by[tag] - {f"h:{ev['handler']}"}:
-                    taint_edges[(src, f"h:{ev['handler']}")] += ev["tainted"]
+                if tag in last and last[tag] != f"h:{ev['handler']}":
+                    taint_edges[(last[tag], f"h:{ev['handler']}")] += ev["tainted"]
+                last[tag] = f"h:{ev['handler']}"
         elif kind == "irq":
             node(f"d:irq:{ev['source']}", f"IRQ source\\n{ev['source']}", "device")
             node("fw:<irq>", f"IRQ {ev['irq']}", "firmware")
@@ -128,22 +135,29 @@ def to_dot(nodes, edges, taint_edges=None) -> str:
                            + f'", {style}' + (', color="#c0392b", penwidth=3' if end else "") + "];")
             out.append("  }")
     out += [f'  "{s}" -> "{d}" [label="{c}"];' for (s, d), c in edges.items()]
-    out += [f'  "{s}" -> "{d}" [label="taint {n}B", color="#c0392b", fontcolor="#c0392b", '
-            f"style=dashed, penwidth=2];" for (s, d), n in taint_edges.items()]
+    for (s, d), n in taint_edges.items():  # n = tainted bytes, or 0 for a firmware-function hop
+        label = f"taint {n}B" if n else "taint"
+        out.append(f'  "{s}" -> "{d}" [label="{label}", color="#c0392b", fontcolor="#c0392b", '
+                   "style=dashed, penwidth=2];")
     return "\n".join(out + ["}"]) + "\n"
 
 
-def taint_report(events: List[Event]) -> List[Dict[str, Any]]:
-    """Per tagged input: the handlers that stored it and read it out (none = lost)."""
+def taint_report(events: List[Event], symbols: Optional[List[Tuple[int, str]]] = None) -> List[Dict[str, Any]]:
+    """Per tagged input: handlers that stored it, firmware functions it passed through,
+    and handlers that read it out (none = lost)."""
     rows: Dict[int, Dict[str, Any]] = {}
     for ev in events:
         if ev["kind"] == "model_rx":
             rows[ev["seq"]] = {"tag": ev["seq"], "t": ev["t"], "source": topic(ev)[0],
-                               "stored": [], "sinks": []}
+                               "stored": [], "through": [], "sinks": []}
+        elif ev["kind"] == "taint_code" and ev["tag"] in rows:
+            rows[ev["tag"]]["through"] += [symbol_at(symbols or [], pc) for pc in ev["pcs"]]
         elif ev["kind"] in ("taint_src", "taint_sink"):
             for tag in ev["tags"]:
                 if tag in rows:
                     rows[tag]["stored" if ev["kind"] == "taint_src" else "sinks"].append(
                         {"t": ev["t"], "handler": ev["handler"], "bytes": ev.get("tainted", ev["len"]),
                          "of": ev["len"]})
+    for row in rows.values():
+        row["through"] = list(dict.fromkeys(row["through"]))
     return list(rows.values())
