@@ -55,10 +55,13 @@ def _cmd_taint(args: argparse.Namespace) -> int:
         if not row["stored"]:
             continue  # received but never adopted into guest memory (e.g. not a handler path)
         print(f"tag #{row['tag']} {row['source']} @{row['t']:.4f}s")
-        for kind in ("stored", "sinks"):
-            for hit in row[kind]:
-                print(f"    {kind[:-1] if kind == 'sinks' else 'stored by':<9} "
-                      f"{hit['handler']} ({hit['bytes']} B) @{hit['t']:.4f}s")
+        for label, hits in (("stored by", row["stored"]), ("read out by", row["sinks"])):
+            by_handler: dict = {}
+            for hit in hits:
+                by_handler.setdefault(hit["handler"], []).append(hit)
+            for handler, group in by_handler.items():
+                print(f"    {label:<11} {handler} x{len(group)} ({sum(h['bytes'] for h in group)} B) "
+                      f"@{group[0]['t']:.4f}-{group[-1]['t']:.4f}s")
         if not row["sinks"]:
             print("    LOST: stored in guest memory, never read out by a handler")
     return 0

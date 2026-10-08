@@ -10,6 +10,8 @@ Implements the BPHandlers class, bp_handle decorator, and other helpers for bp_h
 import struct
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, Union
 
+from halucinator.trace.hook import traced
+
 if TYPE_CHECKING:
     from halucinator.backends.hal_backend import HalBackend
 
@@ -34,13 +36,15 @@ def bp_handler(
     """
     if callable(arg):
         # Handles @bp_handler with out args allows any function
-        arg.is_bp_handler = True  # type: ignore
-        return arg
+        wrapped = traced(arg)
+        wrapped.is_bp_handler = True  # type: ignore
+        return wrapped
 
     # Handles @bp_handler(['F1','F2'])
     def bp_decorator(func: HandlerFunction) -> HandlerFunction:
-        func.bp_func_list = arg  # type: ignore
-        return func
+        wrapped = traced(func)
+        wrapped.bp_func_list = arg  # type: ignore
+        return wrapped
 
     return bp_decorator
 

@@ -154,11 +154,16 @@ def to_dot(nodes: Dict[str, Tuple[str, str, int]], edges: Dict[Tuple[str, str], 
     out = ["digraph halucinator {", "  rankdir=LR; compound=true; fontname=Helvetica;",
            "  node [shape=box, fontname=Helvetica, fontsize=10];",
            "  edge [fontname=Helvetica, fontsize=9];"]
+    ends = {d for (_, d) in (taint_edges or {})} - {s for (s, _) in (taint_edges or {})}
     for cluster, title in TITLES.items():
         members = [(i, n) for i, n in nodes.items() if n[1] == cluster]
         if members:
             out.append(f'  subgraph cluster_{cluster} {{ label="{title}"; style=rounded;')
-            out += [f'    "{i}" [label="{n[0]}\\n×{n[2]}", {_STYLE[cluster]}];' for i, n in members]
+            out += [f'    "{i}" [label="{n[0]}\\n×{n[2]}'
+                    + ('\\n⚑ taint ends here' if i in ends else '')
+                    + f'", {_STYLE[cluster]}'
+                    + (', color="#c0392b", penwidth=3' if i in ends else '') + '];'
+                    for i, n in members]
             out.append("  }")
     out += [f'  "{s}" -> "{d}" [label="{c}"];' for (s, d), c in edges.items()]
     out += [f'  "{s}" -> "{d}" [label="taint {n}B", color="#c0392b", fontcolor="#c0392b", '

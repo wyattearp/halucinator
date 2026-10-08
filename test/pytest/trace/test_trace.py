@@ -181,3 +181,13 @@ def test_graph_and_report_link_source_to_sink():
     row = analyze.taint_report(evs)[0]
     assert row["tag"] == 1 and row["sinks"][0]["handler"] == "tx_h"
     assert analyze.taint_report(evs[:3])[0]["sinks"] == []     # lost without the sink
+
+
+def test_dot_marks_where_taint_ends():
+    evs = [
+        {"seq": 1, "t": 0.0, "kind": "model_rx", "topic": "Peripheral.U.rx", "payload": {}},
+        {"seq": 2, "t": 0.1, "kind": "taint_src", "handler": "rx_h", "addr": 0, "len": 1, "tags": [1]},
+        _icpt(3, 0.11, "rx_h"),
+    ]
+    dot = analyze.to_dot(*analyze.build_graph(evs))
+    assert "taint ends here" in dot and "taint 1B" in dot
